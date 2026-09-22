@@ -3,12 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
-import io
 import re
+import os
+import glob
 
 app = FastAPI(title="SHEIKH-DL Backend")
 
-# ==================== CORS ====================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== MODELS ====================
 class VideoRequest(BaseModel):
     url: str
 
@@ -25,14 +24,12 @@ class DownloadRequest(BaseModel):
     url: str
     format_id: str
 
-# ==================== HELPERS ====================
 def sanitize_filename(name):
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     return name[:80].strip()
 
 def get_format_label(fmt):
     label_parts = []
-
     ext = fmt.get("ext", "")
     vcodec = fmt.get("vcodec", "none")
     acodec = fmt.get("acodec", "none")
@@ -53,6 +50,25 @@ def get_format_label(fmt):
 
     return " ".join(label_parts) if label_parts else "Unknown Format"
 
+# ==================== COMMON YDL OPTIONS ====================
+def get_ydl_opts(extra={}):
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "socket_timeout": 30,
+    }
+    opts.update(extra)
+    return opts
+
 # ==================== ROUTES ====================
 
 @app.get("/")
@@ -62,11 +78,7 @@ def root():
 
 @app.post("/info")
 def get_video_info(req: VideoRequest):
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
+    ydl_opts = get_ydl_opts({"skip_download": True})
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -76,27 +88,22 @@ def get_video_info(req: VideoRequest):
         seen = set()
         formats = []
 
-        # Best video+audio combined (auto)
         formats.append({
             "format_id": "bestvideo+bestaudio/best",
-            "label": "Best Quality (Auto)"
+            "label": "🏆 Best Quality (Auto)"
         })
 
-        # Filter useful formats
         for fmt in reversed(formats_raw):
             fid = fmt.get("format_id")
             height = fmt.get("height")
             vcodec = fmt.get("vcodec", "none")
-            acodec = fmt.get("acodec", "none")
             ext = fmt.get("ext", "")
 
-            # Skip useless formats
             if ext in ["mhtml", "none"]:
                 continue
             if not fid:
                 continue
 
-            # Video formats
             if vcodec != "none" and height and height not in seen:
                 seen.add(height)
                 formats.append({
@@ -104,10 +111,9 @@ def get_video_info(req: VideoRequest):
                     "label": get_format_label(fmt)
                 })
 
-        # Audio only
         formats.append({
             "format_id": "bestaudio",
-            "label": "Audio Only (MP3)"
+            "label": "🎵 Audio Only (MP3)"
         })
 
         return {
@@ -126,53 +132,36 @@ def get_video_info(req: VideoRequest):
 
 @app.post("/download")
 def download_video(req: DownloadRequest):
-    buffer = io.BytesIO()
     filename_holder = {"name": "video.mp4"}
 
-    def ydl_hook(d):
-        pass
-
-    ydl_opts = {
+    ydl_opts = get_ydl_opts({
         "format": req.format_id,
-        "quiet": True,
-        "no_warnings": True,
-        "outtmpl": "-",
-        "logtostderr": False,
-    }
+        "outtmpl": "/tmp/sheikh_dl_temp.%(ext)s",
+        "merge_output_format": "mp4",
+    })
 
-    # Audio only — convert to mp3
     if req.format_id == "bestaudio":
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
-        filename_holder["name"] = "audio.mp3"
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Clean old temp files
+        for f in glob.glob("/tmp/sheikh_dl_temp.*"):
+            os.remove(f)
+
+        with yt_dlp.YoutubeDL(get_ydl_opts({"skip_download": True})) as ydl:
             info = ydl.extract_info(req.url, download=False)
             title = sanitize_filename(info.get("title", "video"))
-
-            if req.format_id == "bestaudio":
-                filename_holder["name"] = f"{title}.mp3"
-            else:
-                ext = info.get("ext", "mp4")
-                filename_holder["name"] = f"{title}.{ext}"
-
-        # Download to buffer
-        ydl_opts["outtmpl"] = "/tmp/sheikh_dl_temp.%(ext)s"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([req.url])
 
-        import os
-        import glob
-
-        # Find downloaded file
         files = glob.glob("/tmp/sheikh_dl_temp.*")
         if not files:
-            raise HTTPException(status_code=500, detail={"error": "Download failed"})
+            raise HTTPException(status_code=500, detail={"error": "Download failed, file not found"})
 
         filepath = files[0]
         ext = filepath.split(".")[-1]
@@ -182,14 +171,13 @@ def download_video(req: DownloadRequest):
         else:
             filename_holder["name"] = f"{title}.{ext}"
 
-        # Stream file
+        mime = "audio/mpeg" if ext == "mp3" else "video/mp4"
+
         def file_stream():
             with open(filepath, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
             os.remove(filepath)
-
-        mime = "audio/mpeg" if ext == "mp3" else "video/mp4"
 
         return StreamingResponse(
             file_stream(),
