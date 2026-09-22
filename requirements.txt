@@ -1,5 +1,9 @@
 fastapi
 uvicorn
-yt-dlp
 python-multipart
 yt-dlp[default]
+brotli
+pycryptodomex
+mutagen
+websockets
+certifi
