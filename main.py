@@ -50,26 +50,27 @@ def get_format_label(fmt):
 
     return " ".join(label_parts) if label_parts else "Unknown Format"
 
-# ==================== COMMON YDL OPTIONS ====================
 def get_ydl_opts(extra={}):
     opts = {
         "quiet": True,
         "no_warnings": True,
+        # tv_simply and android_vr do NOT require PO Token
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": ["tv_simply", "android_vr", "android"],
+                "skip": ["hls", "dash"],
             }
         },
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
+            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
             "Accept-Language": "en-US,en;q=0.9",
         },
         "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
     opts.update(extra)
     return opts
-
-# ==================== ROUTES ====================
 
 @app.get("/")
 def root():
@@ -148,7 +149,6 @@ def download_video(req: DownloadRequest):
         }]
 
     try:
-        # Clean old temp files
         for f in glob.glob("/tmp/sheikh_dl_temp.*"):
             os.remove(f)
 
@@ -161,7 +161,10 @@ def download_video(req: DownloadRequest):
 
         files = glob.glob("/tmp/sheikh_dl_temp.*")
         if not files:
-            raise HTTPException(status_code=500, detail={"error": "Download failed, file not found"})
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Download failed, file not found"}
+            )
 
         filepath = files[0]
         ext = filepath.split(".")[-1]
