@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 yt-dlp[default]
+yt-dlp-ejs
 brotli
 pycryptodomex
 mutagen
