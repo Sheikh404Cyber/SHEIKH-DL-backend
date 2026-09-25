@@ -24,7 +24,6 @@ except ImportError:
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 def update_ytdlp():
-    """Always update to latest nightly + yt-dlp-ejs"""
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-U", "--pre",
@@ -37,18 +36,16 @@ def update_ytdlp():
 
 
 def install_deno():
-    """Install Deno to /tmp/deno (writable on Render)"""
     deno_path = "/tmp/deno"
-
     if os.path.exists(deno_path):
+        # Make sure /tmp is always in PATH
+        _add_tmp_to_path()
         print("✅ Deno already at /tmp/deno")
         return
-
     try:
         arch_result = subprocess.run(["uname", "-m"], capture_output=True, text=True)
         arch = arch_result.stdout.strip()
         print(f"🔍 System arch: {arch}")
-
         if arch == "x86_64":
             url = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
         else:
@@ -61,18 +58,22 @@ def install_deno():
             f"rm -f /tmp/deno.zip",
             shell=True, timeout=120, capture_output=True, text=True
         )
-        print(f"Deno install out: {result.stdout[-300:] if result.stdout else 'none'}")
-        print(f"Deno install err: {result.stderr[-300:] if result.stderr else 'none'}")
-
+        print(f"Deno out: {result.stdout[-200:] if result.stdout else 'none'}")
+        print(f"Deno err: {result.stderr[-200:] if result.stderr else 'none'}")
     except Exception as e:
         print(f"⚠️ Deno install error: {e}")
 
     if os.path.exists(deno_path):
-        # Add /tmp to PATH so yt-dlp can auto-detect deno
-        os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
+        _add_tmp_to_path()
         print("✅ Deno installed + /tmp added to PATH")
     else:
         print("❌ Deno install failed")
+
+
+def _add_tmp_to_path():
+    current = os.environ.get("PATH", "")
+    if "/tmp" not in current.split(":"):
+        os.environ["PATH"] = "/tmp:" + current
 
 
 def copy_cookies():
@@ -85,7 +86,7 @@ def copy_cookies():
         except Exception as e:
             print(f"⚠️ Cookie copy error: {e}")
     else:
-        print("⚠️ No secret cookies found at /etc/secrets/cookies.txt")
+        print("⚠️ No secret cookies found")
 
 
 @asynccontextmanager
@@ -137,7 +138,9 @@ def get_format_label(fmt: dict) -> str:
 
 
 def get_base_opts() -> dict:
-    deno_path = "/tmp/deno"
+    # ✅ DO NOT pass js_runtimes manually
+    # Deno is in /tmp which is added to PATH at startup
+    # yt-dlp will auto-detect deno from PATH
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -153,17 +156,12 @@ def get_base_opts() -> dict:
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
-        # Let yt-dlp auto-select best client with EJS/Deno support
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "android", "web_embedded"],
             }
         },
     }
-
-    # Pass Deno path via js_runtimes (correct format: string)
-    if os.path.exists(deno_path):
-        opts["js_runtimes"] = f"deno:{deno_path}"
 
     # Cookies
     for cp in ["/tmp/cookies.txt", "/etc/secrets/cookies.txt"]:
@@ -188,7 +186,6 @@ def check():
         ytdlp_ver = importlib.metadata.version("yt-dlp")
     except Exception:
         ytdlp_ver = "unknown"
-
     try:
         import importlib.metadata
         ejs_ver = importlib.metadata.version("yt-dlp-ejs")
@@ -201,16 +198,18 @@ def check():
         "yt_dlp_version": ytdlp_ver,
         "yt_dlp_ejs_version": ejs_ver,
         "deno_found": os.path.exists(deno_path),
-        "deno_path": deno_path if os.path.exists(deno_path) else "not found",
         "secret_cookies": os.path.exists("/etc/secrets/cookies.txt"),
         "tmp_cookies": os.path.exists("/tmp/cookies.txt"),
-        "path_env": os.environ.get("PATH", "")[:200],
+        "path_env": os.environ.get("PATH", "")[:300],
     }
 
 
 @app.post("/info")
 def get_video_info(request: VideoRequest):
     try:
+        # Ensure /tmp in PATH every request (in case of worker restart)
+        _add_tmp_to_path()
+
         opts = get_base_opts()
         opts["skip_download"] = True
 
@@ -228,14 +227,12 @@ def get_video_info(request: VideoRequest):
         formats = []
         seen_heights = set()
 
-        # Best auto
         formats.append({
             "format_id": "bestvideo+bestaudio/best",
             "label": "🏆 Best Quality (Auto)",
             "ext": "mp4",
         })
 
-        # By resolution
         for fmt in sorted(
             info.get("formats", []),
             key=lambda x: x.get("height") or 0,
@@ -255,7 +252,6 @@ def get_video_info(request: VideoRequest):
             if len(seen_heights) >= 5:
                 break
 
-        # Audio only
         formats.append({
             "format_id": "bestaudio[ext=m4a]/bestaudio/best",
             "label": "🎵 Audio Only (MP3)",
@@ -277,7 +273,9 @@ def get_video_info(request: VideoRequest):
 @app.post("/download")
 def download_video(request: DownloadRequest):
     try:
-        # Clean old temp files
+        # Ensure /tmp in PATH every request
+        _add_tmp_to_path()
+
         for f in glob.glob("/tmp/sheikh_dl_temp.*"):
             try:
                 os.remove(f)
