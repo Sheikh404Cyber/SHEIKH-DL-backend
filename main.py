@@ -7,25 +7,51 @@ import zipfile
 import urllib.request
 import asyncio
 import tempfile
-from pathlib import Path
+import glob
+import re
 from contextlib import asynccontextmanager
 
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+
+# ─────────────────────────────────────────
+# PIPED API INSTANCES (fallback list)
+# ─────────────────────────────────────────
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
+    "https://pipedapi.leptons.xyz",
+    "https://piped-api.privacy.com.de",
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.ducks.party",
+    "https://api.piped.private.coffee",
+]
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
 
 # ─────────────────────────────────────────
 # STARTUP HELPERS
 # ─────────────────────────────────────────
 
-def run_cmd(cmd: list[str], timeout: int = 180) -> tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)."""
+def run_cmd(cmd: list, timeout: int = 180) -> tuple:
     try:
         result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
+            cmd, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=timeout,
         )
         return result.returncode, result.stdout.decode(errors="replace"), result.stderr.decode(errors="replace")
     except subprocess.TimeoutExpired:
@@ -35,203 +61,53 @@ def run_cmd(cmd: list[str], timeout: int = 180) -> tuple[int, str, str]:
 
 
 def update_ytdlp():
-    """Always install latest nightly yt-dlp + bgutil plugin."""
-    print("⏳ Updating yt-dlp nightly + bgutil plugin...")
-    code, out, err = run_cmd([
+    print("⏳ Updating yt-dlp nightly (fallback engine)...")
+    code, _, err = run_cmd([
         sys.executable, "-m", "pip", "install", "-U", "--pre",
-        "yt-dlp[default]", "bgutil-ytdlp-pot-provider"
+        "yt-dlp[default]"
     ], timeout=180)
     if code == 0:
-        print("✅ yt-dlp nightly + bgutil updated successfully")
+        print("✅ yt-dlp nightly updated")
     else:
-        print(f"⚠️  pip update warning (non-fatal): {err[-300:]}")
-
-
-def install_node():
-    """Install Node.js if not present (needed by bgutil script provider)."""
-    if shutil.which("node"):
-        print(f"✅ Node.js already available: {shutil.which('node')}")
-        return
-
-    print("⏳ Installing Node.js...")
-    arch = platform.machine().lower()
-
-    # Try apt-get first (Debian/Ubuntu based)
-    code, _, _ = run_cmd(["apt-get", "install", "-y", "nodejs", "npm"], timeout=120)
-    if code == 0 and shutil.which("node"):
-        print("✅ Node.js installed via apt-get")
-        return
-
-    # Fallback: download NodeJS binary
-    if "x86_64" in arch or "amd64" in arch:
-        node_url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.gz"
-        node_dir = "node-v20.18.0-linux-x64"
-    else:
-        node_url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-arm64.tar.gz"
-        node_dir = "node-v20.18.0-linux-arm64"
-
-    try:
-        import tarfile
-        dest = "/tmp/node.tar.gz"
-        urllib.request.urlretrieve(node_url, dest)
-        with tarfile.open(dest, "r:gz") as t:
-            t.extractall("/tmp/node_bin")
-        node_path = f"/tmp/node_bin/{node_dir}/bin"
-        # Add to PATH
-        os.environ["PATH"] = node_path + ":" + os.environ.get("PATH", "")
-        # Create symlinks
-        for binary in ["node", "npm", "npx"]:
-            src = os.path.join(node_path, binary)
-            dst = f"/tmp/{binary}"
-            if os.path.exists(src):
-                shutil.copy2(src, dst)
-                os.chmod(dst, 0o755)
-        if shutil.which("node") or os.path.exists("/tmp/node"):
-            print("✅ Node.js installed from binary")
-        else:
-            print("⚠️  Node.js install failed (non-fatal)")
-    except Exception as e:
-        print(f"⚠️  Node.js install error (non-fatal): {e}")
+        print(f"⚠️  yt-dlp update warning: {err[-200:]}")
 
 
 def install_deno():
-    """Install Deno if not present."""
     deno_path = "/tmp/deno"
     if os.path.exists(deno_path):
         os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
-        print(f"✅ Deno already at {deno_path}")
+        print("✅ Deno already installed")
         return
-
     print("⏳ Installing Deno...")
     arch = platform.machine().lower()
-    if "aarch64" in arch or "arm64" in arch:
-        deno_zip_url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip"
-    else:
-        deno_zip_url = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
-
+    url = (
+        "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip"
+        if "aarch64" in arch or "arm64" in arch
+        else "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
+    )
     try:
-        zip_path = "/tmp/deno_dl.zip"
-        urllib.request.urlretrieve(deno_zip_url, zip_path)
-        with zipfile.ZipFile(zip_path, "r") as z:
+        urllib.request.urlretrieve(url, "/tmp/deno_dl.zip")
+        with zipfile.ZipFile("/tmp/deno_dl.zip", "r") as z:
             z.extractall("/tmp")
-        os.chmod(deno_path, 0o755)
+        os.chmod("/tmp/deno", 0o755)
         os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
-        print(f"✅ Deno installed at {deno_path}")
+        print("✅ Deno installed at /tmp/deno")
     except Exception as e:
-        print(f"⚠️  Deno install failed (non-fatal): {e}")
-
-
-def setup_bgutil_server():
-    """Clone bgutil server repo and run it in background on port 4416."""
-    server_dir = "/tmp/bgutil-server"
-    pid_file = "/tmp/bgutil.pid"
-
-    # Check if already running
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                pid = int(f.read().strip())
-            os.kill(pid, 0)  # Check if process alive
-            print(f"✅ bgutil HTTP server already running (PID {pid})")
-            return
-        except (OSError, ProcessLookupError, ValueError):
-            pass  # Process dead, restart
-
-    print("⏳ Setting up bgutil POT server...")
-
-    # Determine JS runtime
-    node_bin = shutil.which("node") or "/tmp/node"
-    deno_bin = shutil.which("deno") or "/tmp/deno"
-    use_deno = os.path.exists(deno_bin)
-    use_node = os.path.exists(node_bin)
-
-    if not use_node and not use_deno:
-        print("⚠️  No JS runtime available for bgutil server (non-fatal)")
-        return
-
-    # Clone repo if needed
-    if not os.path.exists(server_dir):
-        code, _, err = run_cmd([
-            "git", "clone", "--depth=1",
-            "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git",
-            server_dir
-        ], timeout=120)
-        if code != 0:
-            print(f"⚠️  bgutil clone failed (non-fatal): {err[-200:]}")
-            return
-
-    server_src = os.path.join(server_dir, "server")
-
-    if use_node:
-        # Install npm deps
-        if not os.path.exists(os.path.join(server_src, "node_modules")):
-            code, _, err = run_cmd(["npm", "ci"], timeout=180)
-            if code != 0:
-                # Try npm install as fallback
-                os.chdir(server_src)
-                run_cmd(["npm", "install", "--ignore-scripts"], timeout=180)
-
-        # Transpile TypeScript
-        build_dir = os.path.join(server_src, "build")
-        if not os.path.exists(build_dir):
-            os.chdir(server_src)
-            run_cmd(["npx", "tsc"], timeout=120)
-
-        # Start server
-        build_main = os.path.join(server_src, "build", "main.js")
-        if os.path.exists(build_main):
-            proc = subprocess.Popen(
-                [node_bin, build_main, "--port", "4416"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=server_src,
-            )
-            with open(pid_file, "w") as f:
-                f.write(str(proc.pid))
-            print(f"✅ bgutil HTTP server started with Node.js (PID {proc.pid})")
-            return
-
-    if use_deno:
-        # Start with deno
-        main_ts = os.path.join(server_src, "src", "main.ts")
-        if os.path.exists(main_ts):
-            proc = subprocess.Popen(
-                [
-                    deno_bin, "run",
-                    "--allow-env", "--allow-net",
-                    f"--allow-ffi={server_src}/node_modules",
-                    f"--allow-read={server_src}",
-                    main_ts, "--port", "4416"
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=server_src,
-            )
-            with open(pid_file, "w") as f:
-                f.write(str(proc.pid))
-            print(f"✅ bgutil HTTP server started with Deno (PID {proc.pid})")
-            return
-
-    print("⚠️  bgutil server could not start (non-fatal, will use script fallback)")
+        print(f"⚠️  Deno install failed: {e}")
 
 
 def copy_cookies():
-    """Copy cookies from Render secret to /tmp."""
-    src = "/etc/secrets/cookies.txt"
-    dst = "/tmp/cookies.txt"
+    src, dst = "/etc/secrets/cookies.txt", "/tmp/cookies.txt"
     if os.path.exists(src) and not os.path.exists(dst):
-        try:
-            shutil.copy2(src, dst)
-            print(f"✅ Cookies copied: {src} → {dst}")
-        except Exception as e:
-            print(f"⚠️  Cookie copy failed: {e}")
+        shutil.copy2(src, dst)
+        print("✅ Cookies copied")
     elif os.path.exists(dst):
-        print("✅ Cookies already at /tmp/cookies.txt")
+        print("✅ Cookies at /tmp/cookies.txt")
     else:
-        print("ℹ️  No cookies file found (optional)")
+        print("ℹ️  No cookies file (optional)")
 
 
-def get_cookie_file() -> str | None:
+def get_cookie_file():
     for p in ["/tmp/cookies.txt", "/etc/secrets/cookies.txt"]:
         if os.path.exists(p) and os.path.getsize(p) > 0:
             return p
@@ -239,10 +115,103 @@ def get_cookie_file() -> str | None:
 
 
 # ─────────────────────────────────────────
-# YT-DLP OPTIONS
+# HELPERS
 # ─────────────────────────────────────────
 
-def get_base_opts() -> dict:
+def extract_video_id(url: str) -> str | None:
+    m = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([a-zA-Z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
+# ─────────────────────────────────────────
+# PIPED API (PRIMARY — 100% FREE)
+# ─────────────────────────────────────────
+
+def piped_get_streams(video_id: str) -> dict | None:
+    """Try multiple Piped instances until one works."""
+    for instance in PIPED_INSTANCES:
+        try:
+            r = requests.get(
+                f"{instance}/streams/{video_id}",
+                headers=HEADERS,
+                timeout=20,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("videoStreams") or data.get("audioStreams"):
+                    print(f"✅ Piped working: {instance}")
+                    return data
+        except Exception as e:
+            print(f"⚠️  Piped instance {instance} failed: {e}")
+            continue
+    return None
+
+
+def piped_download(video_id: str, quality: str = "best") -> str | None:
+    """Download video via Piped stream URL. Returns file path or None."""
+    data = piped_get_streams(video_id)
+    if not data:
+        return None
+
+    video_streams = data.get("videoStreams", [])
+    audio_streams = data.get("audioStreams", [])
+
+    # Filter non-video-only streams (combined audio+video)
+    combined = [s for s in video_streams if not s.get("videoOnly", True)]
+
+    # If combined stream exists, use it
+    if combined:
+        # Sort by quality: pick best
+        def get_height(s):
+            return s.get("height") or 0
+        combined.sort(key=get_height, reverse=True)
+        stream = combined[0]
+        stream_url = stream.get("url")
+        ext = "mp4"
+    elif video_streams:
+        # video-only: pick best resolution
+        video_streams.sort(key=lambda s: s.get("height") or 0, reverse=True)
+        stream = video_streams[0]
+        stream_url = stream.get("url")
+        ext = "mp4"
+    elif audio_streams:
+        audio_streams.sort(key=lambda s: s.get("bitrate") or 0, reverse=True)
+        stream = audio_streams[0]
+        stream_url = stream.get("url")
+        ext = "m4a"
+    else:
+        return None
+
+    if not stream_url:
+        return None
+
+    out_path = f"/tmp/sheikh_{video_id}.{ext}"
+    try:
+        resp = requests.get(
+            stream_url,
+            stream=True,
+            headers=HEADERS,
+            timeout=120,
+        )
+        if resp.status_code == 200:
+            with open(out_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+            return out_path
+        else:
+            print(f"⚠️  Piped stream download failed: HTTP {resp.status_code}")
+            return None
+    except Exception as e:
+        print(f"⚠️  Piped download error: {e}")
+        return None
+
+
+# ─────────────────────────────────────────
+# YT-DLP (FALLBACK)
+# ─────────────────────────────────────────
+
+def get_ytdlp_opts() -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -261,15 +230,12 @@ def get_base_opts() -> dict:
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb", "web", "android"],
-                "skip": ["dash", "hls"],
             }
         },
     }
-
-    cookie_file = get_cookie_file()
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
-
+    cookie = get_cookie_file()
+    if cookie:
+        opts["cookiefile"] = cookie
     return opts
 
 
@@ -279,22 +245,15 @@ def get_base_opts() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run all setup on startup
     update_ytdlp()
-    install_node()
     install_deno()
     copy_cookies()
-    # Start bgutil server in background thread to not block startup
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, setup_bgutil_server)
-    # Small wait for server to bind
-    await asyncio.sleep(3)
     yield
 
 
 app = FastAPI(
     title="SHEIKH Downloader API",
-    version="4.0.0",
+    version="6.0.0",
     lifespan=lifespan,
 )
 
@@ -323,55 +282,101 @@ class DownloadRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "SHEIKH Downloader API v4.0 is running 🚀"}
+    return {"status": "SHEIKH Downloader API v6.0 🚀", "engine": "Piped API (free) + yt-dlp fallback"}
 
 
 @app.get("/check")
 def check():
     import importlib.metadata as meta
-    node_bin = shutil.which("node") or "/tmp/node"
-    deno_bin = shutil.which("deno") or "/tmp/deno"
-
     try:
-        ytdlp_version = meta.version("yt-dlp")
+        ytdlp_ver = meta.version("yt-dlp")
     except Exception:
-        ytdlp_version = "unknown"
+        ytdlp_ver = "unknown"
 
-    try:
-        bgutil_version = meta.version("bgutil-ytdlp-pot-provider")
-    except Exception:
-        bgutil_version = "not installed"
-
-    bgutil_running = False
-    try:
-        import urllib.request as ur
-        with ur.urlopen("http://127.0.0.1:4416", timeout=2) as r:
-            bgutil_running = True
-    except Exception:
-        pass
+    # Quick ping to first Piped instance
+    piped_ok = False
+    working_instance = None
+    for inst in PIPED_INSTANCES[:3]:
+        try:
+            r = requests.get(f"{inst}/trending?region=US", timeout=5)
+            if r.status_code == 200:
+                piped_ok = True
+                working_instance = inst
+                break
+        except Exception:
+            continue
 
     return {
         "status": "ok",
-        "yt_dlp_version": ytdlp_version,
-        "bgutil_plugin_version": bgutil_version,
-        "bgutil_server_running": bgutil_running,
-        "node_found": os.path.exists(node_bin),
-        "deno_found": os.path.exists(deno_bin),
+        "yt_dlp_version": ytdlp_ver,
+        "piped_api_working": piped_ok,
+        "piped_working_instance": working_instance,
+        "deno_found": os.path.exists("/tmp/deno"),
         "secret_cookies": os.path.exists("/etc/secrets/cookies.txt"),
         "tmp_cookies": os.path.exists("/tmp/cookies.txt"),
-        "path": os.environ.get("PATH", ""),
     }
 
 
 @app.post("/info")
 async def get_info(req: URLRequest):
+    loop = asyncio.get_event_loop()
+    video_id = extract_video_id(req.url)
+
+    # ── PRIMARY: Piped API (Free, No Key) ──
+    if video_id:
+        try:
+            data = await asyncio.wait_for(
+                loop.run_in_executor(None, piped_get_streams, video_id),
+                timeout=40,
+            )
+            if data:
+                video_streams = data.get("videoStreams", [])
+                audio_streams = data.get("audioStreams", [])
+                formats = []
+
+                for s in video_streams:
+                    formats.append({
+                        "format_id": f"video_{s.get('quality', 'unknown')}",
+                        "ext": "mp4",
+                        "resolution": s.get("quality"),
+                        "height": s.get("height"),
+                        "codec": s.get("codec"),
+                        "bitrate": s.get("bitrate"),
+                        "video_only": s.get("videoOnly", False),
+                        "url": s.get("url"),
+                    })
+                for s in audio_streams:
+                    formats.append({
+                        "format_id": f"audio_{s.get('quality', 'unknown')}",
+                        "ext": "m4a",
+                        "resolution": s.get("quality"),
+                        "codec": s.get("codec"),
+                        "bitrate": s.get("bitrate"),
+                        "video_only": False,
+                        "url": s.get("url"),
+                    })
+
+                return {
+                    "source": "piped_api",
+                    "title": data.get("title", ""),
+                    "thumbnail": data.get("thumbnailUrl", ""),
+                    "duration": data.get("duration"),
+                    "uploader": data.get("uploader", ""),
+                    "views": data.get("views"),
+                    "likes": data.get("likes"),
+                    "description": data.get("description", "")[:500],
+                    "formats": formats,
+                }
+        except asyncio.TimeoutError:
+            print("⚠️  Piped timeout, falling back to yt-dlp")
+        except Exception as e:
+            print(f"⚠️  Piped info failed: {e}")
+
+    # ── FALLBACK: yt-dlp ──
     try:
         import yt_dlp
-
-        opts = get_base_opts()
+        opts = get_ytdlp_opts()
         opts["skip_download"] = True
-
-        loop = asyncio.get_event_loop()
 
         def _extract():
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -381,7 +386,6 @@ async def get_info(req: URLRequest):
             loop.run_in_executor(None, _extract),
             timeout=120,
         )
-
         formats = []
         for f in info.get("formats", []):
             formats.append({
@@ -391,10 +395,9 @@ async def get_info(req: URLRequest):
                 "filesize": f.get("filesize") or f.get("filesize_approx"),
                 "vcodec": f.get("vcodec"),
                 "acodec": f.get("acodec"),
-                "tbr": f.get("tbr"),
             })
-
         return {
+            "source": "yt-dlp",
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
             "duration": info.get("duration"),
@@ -402,25 +405,49 @@ async def get_info(req: URLRequest):
             "view_count": info.get("view_count"),
             "formats": formats,
         }
-
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Request timed out. Try again.")
+        raise HTTPException(status_code=504, detail="Timed out on all engines.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"All engines failed. Error: {str(e)}"
+        )
 
 
 @app.post("/download")
 async def download_video(req: DownloadRequest):
+    loop = asyncio.get_event_loop()
+    video_id = extract_video_id(req.url)
+
+    # ── PRIMARY: Piped API (Free) ──
+    if video_id and not req.audio_only:
+        try:
+            filepath = await asyncio.wait_for(
+                loop.run_in_executor(None, piped_download, video_id, req.format_id),
+                timeout=200,
+            )
+            if filepath and os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                return FileResponse(
+                    path=filepath,
+                    filename=os.path.basename(filepath),
+                    media_type="application/octet-stream",
+                )
+        except asyncio.TimeoutError:
+            print("⚠️  Piped download timeout, trying yt-dlp")
+        except Exception as e:
+            print(f"⚠️  Piped download failed: {e}")
+
+    # ── FALLBACK: yt-dlp ──
     try:
         import yt_dlp
-        from fastapi.responses import FileResponse
-
-        opts = get_base_opts()
+        opts = get_ytdlp_opts()
 
         with tempfile.NamedTemporaryFile(
-            suffix=".%(ext)s", prefix="sheikh_dl_", dir="/tmp", delete=False
+            suffix=".tmp", prefix="sheikh_", dir="/tmp", delete=False
         ) as tmp:
-            out_tmpl = tmp.name.replace(".%(ext)s", "") + ".%(ext)s"
+            base_path = tmp.name.replace(".tmp", "")
+
+        out_tmpl = base_path + ".%(ext)s"
 
         if req.audio_only:
             opts["format"] = "bestaudio/best"
@@ -430,11 +457,12 @@ async def download_video(req: DownloadRequest):
                 "preferredquality": "192",
             }]
         else:
-            opts["format"] = req.format_id if req.format_id != "best" else "bestvideo+bestaudio/best"
+            opts["format"] = (
+                req.format_id if req.format_id not in ["best", ""]
+                else "bestvideo+bestaudio/best"
+            )
 
         opts["outtmpl"] = out_tmpl
-
-        loop = asyncio.get_event_loop()
 
         def _download():
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -447,14 +475,11 @@ async def download_video(req: DownloadRequest):
         )
 
         if not os.path.exists(filename):
-            # Try finding the file with glob
-            import glob
-            base = out_tmpl.replace(".%(ext)s", "")
-            matches = glob.glob(base + ".*")
-            if matches:
-                filename = matches[0]
-            else:
-                raise HTTPException(status_code=500, detail="Downloaded file not found")
+            matches = glob.glob(base_path + ".*")
+            filename = matches[0] if matches else None
+
+        if not filename or not os.path.exists(filename):
+            raise HTTPException(status_code=500, detail="File not found after download")
 
         return FileResponse(
             path=filename,
