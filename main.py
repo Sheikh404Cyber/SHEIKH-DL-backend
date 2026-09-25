@@ -47,24 +47,30 @@ def get_format_label(f: dict) -> str:
     return f"{ext}{size_str}"
 
 def get_base_opts():
-    return {
+    cookies_path = "/etc/secrets/cookies.txt"
+
+    opts = {
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android_vr", "web_embedded", "tv", "android"],
+                "player_client": ["web", "android", "mweb"],
             }
         },
         "http_headers": {
-            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
         "socket_timeout": 45,
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
-        "ignoreerrors": False,
     }
+
+    if os.path.exists(cookies_path):
+        opts["cookiefile"] = cookies_path
+
+    return opts
 
 @app.get("/")
 def root():
@@ -120,8 +126,7 @@ def get_video_info(req: VideoRequest):
         }
 
     except Exception as e:
-        error_msg = str(e)
-        return JSONResponse(status_code=400, content={"error": error_msg})
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.post("/download")
 def download_video(req: DownloadRequest):
