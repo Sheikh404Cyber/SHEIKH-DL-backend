@@ -30,7 +30,7 @@ def update_ytdlp():
              "yt-dlp[default]", "yt-dlp-ejs"],
             timeout=120, capture_output=True
         )
-        print("✅ yt-dlp + yt-dlp-ejs updated to latest")
+        print("✅ yt-dlp + yt-dlp-ejs updated")
     except Exception as e:
         print(f"⚠️ Update failed: {e}")
 
@@ -38,14 +38,12 @@ def update_ytdlp():
 def install_deno():
     deno_path = "/tmp/deno"
     if os.path.exists(deno_path):
-        # Make sure /tmp is always in PATH
-        _add_tmp_to_path()
         print("✅ Deno already at /tmp/deno")
         return
     try:
         arch_result = subprocess.run(["uname", "-m"], capture_output=True, text=True)
         arch = arch_result.stdout.strip()
-        print(f"🔍 System arch: {arch}")
+        print(f"🔍 Arch: {arch}")
         if arch == "x86_64":
             url = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
         else:
@@ -64,16 +62,9 @@ def install_deno():
         print(f"⚠️ Deno install error: {e}")
 
     if os.path.exists(deno_path):
-        _add_tmp_to_path()
-        print("✅ Deno installed + /tmp added to PATH")
+        print("✅ Deno installed at /tmp/deno")
     else:
         print("❌ Deno install failed")
-
-
-def _add_tmp_to_path():
-    current = os.environ.get("PATH", "")
-    if "/tmp" not in current.split(":"):
-        os.environ["PATH"] = "/tmp:" + current
 
 
 def copy_cookies():
@@ -82,11 +73,9 @@ def copy_cookies():
     if os.path.exists(src):
         try:
             shutil.copy2(src, dst)
-            print("✅ Cookies copied to /tmp/cookies.txt")
+            print("✅ Cookies copied")
         except Exception as e:
             print(f"⚠️ Cookie copy error: {e}")
-    else:
-        print("⚠️ No secret cookies found")
 
 
 @asynccontextmanager
@@ -138,9 +127,7 @@ def get_format_label(fmt: dict) -> str:
 
 
 def get_base_opts() -> dict:
-    # ✅ DO NOT pass js_runtimes manually
-    # Deno is in /tmp which is added to PATH at startup
-    # yt-dlp will auto-detect deno from PATH
+    deno_path = "/tmp/deno"
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -161,9 +148,10 @@ def get_base_opts() -> dict:
                 "player_client": ["web", "android", "web_embedded"],
             }
         },
+        # ✅ 100% correct format from yt-dlp source code
+        "js_runtimes": {"deno": {"path": deno_path}} if os.path.exists(deno_path) else {},
     }
 
-    # Cookies
     for cp in ["/tmp/cookies.txt", "/etc/secrets/cookies.txt"]:
         if os.path.exists(cp):
             opts["cookiefile"] = cp
@@ -192,24 +180,19 @@ def check():
     except Exception:
         ejs_ver = "not installed"
 
-    deno_path = "/tmp/deno"
     return {
         "status": "ok",
         "yt_dlp_version": ytdlp_ver,
         "yt_dlp_ejs_version": ejs_ver,
-        "deno_found": os.path.exists(deno_path),
+        "deno_found": os.path.exists("/tmp/deno"),
         "secret_cookies": os.path.exists("/etc/secrets/cookies.txt"),
         "tmp_cookies": os.path.exists("/tmp/cookies.txt"),
-        "path_env": os.environ.get("PATH", "")[:300],
     }
 
 
 @app.post("/info")
 def get_video_info(request: VideoRequest):
     try:
-        # Ensure /tmp in PATH every request (in case of worker restart)
-        _add_tmp_to_path()
-
         opts = get_base_opts()
         opts["skip_download"] = True
 
@@ -217,10 +200,7 @@ def get_video_info(request: VideoRequest):
             info = ydl.extract_info(request.url, download=False)
 
         title = info.get("title", "Unknown")
-        thumbnail = (
-            info.get("thumbnail")
-            or "https://via.placeholder.com/200x120?text=No+Thumbnail"
-        )
+        thumbnail = info.get("thumbnail") or "https://via.placeholder.com/200x120?text=No+Thumbnail"
         duration = info.get("duration", 0)
         uploader = info.get("uploader", "Unknown")
 
@@ -273,9 +253,6 @@ def get_video_info(request: VideoRequest):
 @app.post("/download")
 def download_video(request: DownloadRequest):
     try:
-        # Ensure /tmp in PATH every request
-        _add_tmp_to_path()
-
         for f in glob.glob("/tmp/sheikh_dl_temp.*"):
             try:
                 os.remove(f)
@@ -307,10 +284,7 @@ def download_video(request: DownloadRequest):
 
         files = glob.glob("/tmp/sheikh_dl_temp.*")
         if not files:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Downloaded file not found"},
-            )
+            return JSONResponse(status_code=500, content={"error": "File not found after download"})
 
         file_path = files[0]
         ext = os.path.splitext(file_path)[1].lstrip(".")
