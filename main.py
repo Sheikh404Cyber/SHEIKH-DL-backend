@@ -47,6 +47,7 @@ def get_format_label(f: dict) -> str:
     return f"{ext}{size_str}"
 
 def get_base_opts():
+    # Render secret file path
     cookies_path = "/etc/secrets/cookies.txt"
 
     opts = {
@@ -75,6 +76,14 @@ def get_base_opts():
 @app.get("/")
 def root():
     return {"status": "SHEIKH-DL Backend is running!"}
+
+@app.get("/check-cookies")
+def check_cookies():
+    cookies_path = "/etc/secrets/cookies.txt"
+    if os.path.exists(cookies_path):
+        size = os.path.getsize(cookies_path)
+        return {"cookies_found": True, "file_size_bytes": size}
+    return {"cookies_found": False}
 
 @app.post("/info")
 def get_video_info(req: VideoRequest):
