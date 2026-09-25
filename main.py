@@ -10,12 +10,28 @@ import shutil
 import subprocess
 import sys
 
-# Auto-update yt-dlp on startup
-try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"],
-                   capture_output=True, timeout=60)
-except Exception:
-    pass
+# Install yt-dlp nightly + deno on startup
+def setup():
+    try:
+        # Install yt-dlp nightly version
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp[default]"],
+            capture_output=True, timeout=120
+        )
+    except Exception:
+        pass
+
+    try:
+        # Install deno (JS runtime needed for YouTube)
+        if not shutil.which("deno"):
+            subprocess.run(
+                "curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh",
+                shell=True, capture_output=True, timeout=120
+            )
+    except Exception:
+        pass
+
+setup()
 
 app = FastAPI()
 
@@ -51,7 +67,6 @@ def get_base_opts():
     cookies_src = "/etc/secrets/cookies.txt"
     cookies_dst = "/tmp/cookies.txt"
 
-    # Copy cookies to writable /tmp folder
     if os.path.exists(cookies_src):
         try:
             shutil.copy2(cookies_src, cookies_dst)
@@ -85,15 +100,17 @@ def get_base_opts():
 def root():
     return {"status": "SHEIKH-DL Backend is running!"}
 
-@app.get("/check-cookies")
-def check_cookies():
+@app.get("/check")
+def check():
     cookies_src = "/etc/secrets/cookies.txt"
     cookies_dst = "/tmp/cookies.txt"
+    deno = shutil.which("deno")
     return {
-        "secret_file_exists": os.path.exists(cookies_src),
-        "tmp_file_exists": os.path.exists(cookies_dst),
-        "secret_size": os.path.getsize(cookies_src) if os.path.exists(cookies_src) else 0,
-        "tmp_size": os.path.getsize(cookies_dst) if os.path.exists(cookies_dst) else 0,
+        "secret_cookies": os.path.exists(cookies_src),
+        "tmp_cookies": os.path.exists(cookies_dst),
+        "deno_found": deno is not None,
+        "deno_path": deno,
+        "yt_dlp_version": yt_dlp.version.__version__,
     }
 
 @app.post("/info")
