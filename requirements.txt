@@ -1,9 +1,9 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
-yt-dlp[default]
 brotli
 pycryptodomex
 mutagen
 websockets
 certifi
+requests
