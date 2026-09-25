@@ -10,173 +10,27 @@ from pydantic import BaseModel
 
 
 # ─────────────────────────────────────────
-# STARTUP HELPERS
+# GLOBALS
+# ─────────────────────────────────────────
+BGUTIL_PORT = 4416
+BGUTIL_URL  = f"http://127.0.0.1:{BGUTIL_PORT}"
+_bgutil_running = False
+
+
+# ─────────────────────────────────────────
+# HELPERS
 # ─────────────────────────────────────────
 
-def run_cmd(cmd: list, timeout: int = 180, cwd=None) -> tuple:
+def run_cmd(cmd, timeout=180, cwd=None, env=None):
     try:
+        e = {**os.environ, **(env or {})}
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, cwd=cwd)
+                           timeout=timeout, cwd=cwd, env=e)
         return r.returncode, r.stdout.decode(errors="replace"), r.stderr.decode(errors="replace")
     except subprocess.TimeoutExpired:
         return -1, "", "TIMEOUT"
-    except Exception as e:
-        return -1, "", str(e)
-
-
-def update_ytdlp():
-    print("⏳ Updating yt-dlp nightly + bgutil...")
-    code, _, err = run_cmd([
-        sys.executable, "-m", "pip", "install", "-U", "--pre",
-        "yt-dlp[default]", "bgutil-ytdlp-pot-provider"
-    ], timeout=180)
-    print("✅ yt-dlp updated" if code == 0 else f"⚠️ yt-dlp warn: {err[-150:]}")
-
-
-def install_nodejs():
-    """Install Node.js for bgutil PO token server."""
-    if shutil.which("node"):
-        print(f"✅ Node.js: {shutil.which('node')}")
-        return True
-
-    print("⏳ Installing Node.js...")
-    arch = platform.machine().lower()
-    node_url = (
-        "https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-arm64.tar.gz"
-        if ("aarch64" in arch or "arm64" in arch)
-        else "https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz"
-    )
-    node_dir = "node-v20.18.1-linux-arm64" if ("aarch64" in arch or "arm64" in arch) else "node-v20.18.1-linux-x64"
-
-    try:
-        import tarfile
-        tar_path = "/tmp/node.tar.gz"
-        urllib.request.urlretrieve(node_url, tar_path)
-        with tarfile.open(tar_path, "r:gz") as t:
-            t.extractall("/tmp/node_install")
-        node_bin = f"/tmp/node_install/{node_dir}/bin"
-        os.environ["PATH"] = node_bin + ":" + os.environ.get("PATH", "")
-        for b in ["node", "npm", "npx"]:
-            src = os.path.join(node_bin, b)
-            dst = f"/tmp/{b}"
-            if os.path.exists(src):
-                shutil.copy2(src, dst)
-                os.chmod(dst, 0o755)
-        if shutil.which("node") or os.path.exists("/tmp/node"):
-            os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
-            print("✅ Node.js installed")
-            return True
-    except Exception as e:
-        print(f"⚠️ Node.js install failed: {e}")
-    return False
-
-
-def setup_bgutil_pot_server():
-    """Clone + build + start bgutil PO Token HTTP server on port 4416."""
-    pid_file = "/tmp/bgutil.pid"
-    server_dir = "/tmp/bgutil-server"
-
-    # Check if already running
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                pid = int(f.read().strip())
-            os.kill(pid, 0)
-            print(f"✅ bgutil POT server already running PID={pid}")
-            os.environ["YT_DLP_POT_PROVIDER_URL"] = "http://127.0.0.1:4416"
-            return True
-        except Exception:
-            pass
-
-    node_bin = shutil.which("node") or "/tmp/node"
-    if not os.path.exists(node_bin):
-        print("⚠️ No Node.js — skipping bgutil server")
-        return False
-
-    print("⏳ Cloning bgutil POT server...")
-    if not os.path.exists(server_dir):
-        code, _, err = run_cmd([
-            "git", "clone", "--depth=1",
-            "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git",
-            server_dir
-        ], timeout=120)
-        if code != 0:
-            print(f"⚠️ Clone failed: {err[-150:]}")
-            return False
-
-    srv = os.path.join(server_dir, "server")
-    nm = os.path.join(srv, "node_modules")
-    build = os.path.join(srv, "build", "main.js")
-
-    if not os.path.exists(nm):
-        print("⏳ npm install...")
-        run_cmd([node_bin, os.path.join(shutil.which("npm") or "/tmp/npm", ""), "ci"],
-                timeout=180, cwd=srv)
-        # fallback
-        if not os.path.exists(nm):
-            run_cmd([shutil.which("npm") or "/tmp/npm", "install", "--ignore-scripts"],
-                    timeout=180, cwd=srv)
-
-    if not os.path.exists(build):
-        print("⏳ npx tsc...")
-        run_cmd([shutil.which("npx") or "/tmp/npx", "tsc"], timeout=120, cwd=srv)
-
-    if not os.path.exists(build):
-        print("⚠️ bgutil build failed — TypeScript compile error")
-        return False
-
-    proc = subprocess.Popen(
-        [node_bin, build, "--port", "4416"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=srv
-    )
-    with open(pid_file, "w") as f:
-        f.write(str(proc.pid))
-
-    time.sleep(3)  # wait for server to bind
-
-    # Verify server is up
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:4416", timeout=3):
-            pass
-    except Exception:
-        pass  # server may return error but still be running
-
-    os.environ["YT_DLP_POT_PROVIDER_URL"] = "http://127.0.0.1:4416"
-    print(f"✅ bgutil POT server running PID={proc.pid}")
-    return True
-
-
-def install_deno():
-    deno_path = "/tmp/deno"
-    if os.path.exists(deno_path):
-        os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
-        print("✅ Deno already at /tmp/deno")
-        return
-    print("⏳ Installing Deno...")
-    arch = platform.machine().lower()
-    url = (
-        "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip"
-        if ("aarch64" in arch or "arm64" in arch)
-        else "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
-    )
-    try:
-        urllib.request.urlretrieve(url, "/tmp/deno_dl.zip")
-        with zipfile.ZipFile("/tmp/deno_dl.zip", "r") as z:
-            z.extractall("/tmp")
-        os.chmod("/tmp/deno", 0o755)
-        os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
-        print("✅ Deno installed")
-    except Exception as e:
-        print(f"⚠️ Deno install failed: {e}")
-
-
-def copy_cookies():
-    src, dst = "/etc/secrets/cookies.txt", "/tmp/cookies.txt"
-    if os.path.exists(src) and not os.path.exists(dst):
-        shutil.copy2(src, dst)
-        print("✅ Cookies copied to /tmp")
-    elif os.path.exists(dst):
-        print("✅ Cookies at /tmp/cookies.txt")
+    except Exception as ex:
+        return -1, "", str(ex)
 
 
 def get_cookie_file():
@@ -186,73 +40,271 @@ def get_cookie_file():
     return None
 
 
-# ─────────────────────────────────────────
-# VIDEO ID EXTRACT
-# ─────────────────────────────────────────
-
-def extract_video_id(url: str):
+def extract_video_id(url):
     m = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([a-zA-Z0-9_-]{11})", url)
     return m.group(1) if m else None
 
 
 # ─────────────────────────────────────────
-# OEMBED - FREE METADATA (NEVER BLOCKED)
+# STARTUP STEPS
 # ─────────────────────────────────────────
 
-def get_oembed_info(url: str) -> dict | None:
-    """YouTube oEmbed API — unlimited, never blocked by datacenter IPs."""
+def step_update_ytdlp():
+    print("⏳ [1/5] Updating yt-dlp nightly + bgutil plugin...")
+    code, _, err = run_cmd([
+        sys.executable, "-m", "pip", "install", "-U", "--pre",
+        "yt-dlp[default]", "bgutil-ytdlp-pot-provider"
+    ], timeout=180)
+    print("✅ yt-dlp + bgutil plugin updated" if code == 0
+          else f"⚠️  pip warn: {err[-100:]}")
+
+
+def step_install_node22():
+    """Install Node.js 22 — required by bgutil 2.0.0"""
+    global _node_bin
+
+    # Check if already good enough
+    node = shutil.which("node") or "/tmp/node"
+    if os.path.exists(node):
+        code, ver, _ = run_cmd([node, "--version"])
+        if code == 0:
+            major = int(ver.strip().lstrip("v").split(".")[0])
+            if major >= 22:
+                print(f"✅ [2/5] Node.js {ver.strip()} already installed")
+                os.environ["PATH"] = os.path.dirname(node) + ":" + os.environ.get("PATH","")
+                return node
+            else:
+                print(f"⚠️  Node.js {ver.strip()} too old, need >=22, reinstalling...")
+
+    print("⏳ [2/5] Installing Node.js 22...")
+    arch = platform.machine().lower()
+    if "aarch64" in arch or "arm64" in arch:
+        url  = "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-arm64.tar.gz"
+        dname = "node-v22.11.0-linux-arm64"
+    else:
+        url  = "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.gz"
+        dname = "node-v22.11.0-linux-x64"
+
     try:
-        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-        with urllib.request.urlopen(oembed_url, timeout=10) as r:
-            return json.loads(r.read())
+        import tarfile
+        tar_path = "/tmp/node22.tar.gz"
+        print(f"  Downloading Node.js 22 from {url}...")
+        urllib.request.urlretrieve(url, tar_path)
+        extract_dir = "/tmp/node22_install"
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(tar_path, "r:gz") as t:
+            t.extractall(extract_dir)
+        node_bin_dir = f"{extract_dir}/{dname}/bin"
+        os.environ["PATH"] = node_bin_dir + ":" + os.environ.get("PATH","")
+        # Symlink to /tmp for convenience
+        for b in ["node","npm","npx"]:
+            src = os.path.join(node_bin_dir, b)
+            dst = f"/tmp/{b}"
+            if os.path.exists(src):
+                try:
+                    if os.path.exists(dst): os.remove(dst)
+                    os.symlink(src, dst)
+                except Exception:
+                    shutil.copy2(src, dst)
+                    os.chmod(dst, 0o755)
+        node_path = shutil.which("node") or "/tmp/node"
+        code, ver, _ = run_cmd([node_path, "--version"])
+        print(f"✅ Node.js installed: {ver.strip()}")
+        return node_path
     except Exception as e:
-        print(f"⚠️ oEmbed failed: {e}")
+        print(f"⚠️  Node.js 22 install failed: {e}")
         return None
 
 
+def step_install_deno():
+    deno = "/tmp/deno"
+    if os.path.exists(deno):
+        os.environ["PATH"] = "/tmp:" + os.environ.get("PATH","")
+        print("✅ [3/5] Deno already installed")
+        return
+    print("⏳ [3/5] Installing Deno...")
+    arch = platform.machine().lower()
+    url = (
+        "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip"
+        if ("aarch64" in arch or "arm64" in arch)
+        else "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
+    )
+    try:
+        urllib.request.urlretrieve(url, "/tmp/deno_dl.zip")
+        with zipfile.ZipFile("/tmp/deno_dl.zip") as z:
+            z.extractall("/tmp")
+        os.chmod(deno, 0o755)
+        os.environ["PATH"] = "/tmp:" + os.environ.get("PATH","")
+        print("✅ Deno installed at /tmp/deno")
+    except Exception as e:
+        print(f"⚠️  Deno install failed: {e}")
+
+
+def step_setup_bgutil(node_bin):
+    """Clone bgutil repo, build it, start HTTP server on port 4416."""
+    global _bgutil_running
+    pid_file   = "/tmp/bgutil.pid"
+    server_dir = "/tmp/bgutil-server"
+    srv_src    = os.path.join(server_dir, "server")
+    build_main = os.path.join(srv_src, "build", "main.js")
+
+    if not node_bin or not os.path.exists(node_bin):
+        node_bin = shutil.which("node") or "/tmp/node"
+    if not os.path.exists(node_bin):
+        print("⚠️  [4/5] No Node.js — bgutil server skipped")
+        return
+
+    # Check already running
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            _bgutil_running = True
+            print(f"✅ [4/5] bgutil server already running PID={pid}")
+            return
+        except Exception:
+            pass
+
+    print("⏳ [4/5] Setting up bgutil POT server...")
+
+    # Clone
+    if not os.path.exists(server_dir):
+        code, _, err = run_cmd([
+            "git", "clone", "--depth=1", "--branch", "2.0.0",
+            "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git",
+            server_dir
+        ], timeout=120)
+        if code != 0:
+            print(f"⚠️  bgutil clone failed: {err[-150:]}")
+            return
+
+    npm_bin = shutil.which("npm") or "/tmp/npm"
+    npx_bin = shutil.which("npx") or "/tmp/npx"
+
+    # npm ci
+    if not os.path.exists(os.path.join(srv_src, "node_modules")):
+        print("  ⏳ npm ci...")
+        code, out, err = run_cmd([npm_bin, "ci"], timeout=240, cwd=srv_src)
+        if code != 0:
+            print(f"  ⚠️  npm ci failed, trying npm install: {err[-100:]}")
+            run_cmd([npm_bin, "install"], timeout=240, cwd=srv_src)
+
+    # tsc compile
+    if not os.path.exists(build_main):
+        print("  ⏳ npx tsc (TypeScript compile)...")
+        code, out, err = run_cmd([npx_bin, "tsc"], timeout=120, cwd=srv_src)
+        if code != 0:
+            print(f"  ⚠️  tsc failed: {err[-200:]}")
+
+    if not os.path.exists(build_main):
+        print("⚠️  bgutil build/main.js not found — server skipped")
+        return
+
+    # Start server
+    proc = subprocess.Popen(
+        [node_bin, build_main, "--port", str(BGUTIL_PORT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=srv_src
+    )
+    with open(pid_file, "w") as f:
+        f.write(str(proc.pid))
+
+    # Wait up to 10s for server to be ready
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            urllib.request.urlopen(f"{BGUTIL_URL}/", timeout=2)
+            break
+        except Exception:
+            pass
+
+    _bgutil_running = True
+    print(f"✅ bgutil POT server started — PID={proc.pid} on port {BGUTIL_PORT}")
+
+
+def step_copy_cookies():
+    print("⏳ [5/5] Setting up cookies...")
+    src, dst = "/etc/secrets/cookies.txt", "/tmp/cookies.txt"
+    if os.path.exists(src) and not os.path.exists(dst):
+        shutil.copy2(src, dst)
+        print("✅ Cookies copied to /tmp/cookies.txt")
+    elif os.path.exists(dst):
+        print("✅ Cookies already at /tmp/cookies.txt")
+    else:
+        print("ℹ️  No cookies (optional)")
+
+
 # ─────────────────────────────────────────
-# YT-DLP OPTIONS (battle-tested clients)
+# YT-DLP OPTIONS
 # ─────────────────────────────────────────
 
-# Player client rotation strategies (most reliable first)
-CLIENT_STRATEGIES = [
+# Best client combos for datacenter IPs — ordered by success rate
+CLIENT_COMBOS = [
     ["tv_downgraded", "web_embedded"],
-    ["android_vr", "tv_downgraded"],
-    ["web_creator", "tv_downgraded"],
-    ["mweb", "tv_downgraded"],
+    ["android_vr"],
     ["tv_downgraded"],
+    ["web_embedded"],
+    ["mweb"],
 ]
 
 
-def get_ytdlp_opts(client_index: int = 0) -> dict:
-    clients = CLIENT_STRATEGIES[client_index % len(CLIENT_STRATEGIES)]
+def make_ytdlp_opts(combo_index=0, extra=None):
+    clients = CLIENT_COMBOS[combo_index % len(CLIENT_COMBOS)]
+
+    # Build extractor_args — include bgutil base_url explicitly
+    ext_args = {
+        "youtube": {
+            "player_client": clients,
+            "player_skip": ["webpage"],
+        },
+    }
+    if _bgutil_running:
+        ext_args["youtubepot-bgutilhttp"] = {
+            "base_url": BGUTIL_URL,
+        }
+
     opts = {
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 2,
+        "fragment_retries": 2,
         "nocheckcertificate": True,
         "force_ipv4": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": clients,
-                "player_skip": ["webpage"],
-            }
-        },
+        "extractor_args": ext_args,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
+                "Chrome/126.0.0.0 Safari/537.36"
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
+
     cookie = get_cookie_file()
     if cookie:
         opts["cookiefile"] = cookie
+
+    if extra:
+        opts.update(extra)
+
     return opts
+
+
+# ─────────────────────────────────────────
+# OEMBED FALLBACK
+# ─────────────────────────────────────────
+
+def oembed_info(url):
+    try:
+        with urllib.request.urlopen(
+            f"https://www.youtube.com/oembed?url={url}&format=json", timeout=8
+        ) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────
@@ -261,16 +313,16 @@ def get_ytdlp_opts(client_index: int = 0) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    update_ytdlp()
-    install_nodejs()
-    install_deno()
-    copy_cookies()
+    step_update_ytdlp()
+    node_bin = step_install_node22()
+    step_install_deno()
+    step_copy_cookies()
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, setup_bgutil_pot_server)
+    await loop.run_in_executor(None, step_setup_bgutil, node_bin)
     yield
 
 
-app = FastAPI(title="SHEIKH Downloader API", version="7.0.0", lifespan=lifespan)
+app = FastAPI(title="SHEIKH Downloader API", version="8.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                   allow_methods=["*"], allow_headers=["*"])
 
@@ -291,74 +343,113 @@ class DownloadRequest(BaseModel):
 
 @app.get("/")
 def root():
-    pot_url = os.environ.get("YT_DLP_POT_PROVIDER_URL", "not set")
-    return {
-        "status": "SHEIKH Downloader API v7.0 🚀",
-        "pot_provider": pot_url,
-    }
+    return {"status": "SHEIKH Downloader API v8.0 🚀",
+            "bgutil_server": _bgutil_running}
 
 
 @app.get("/check")
 def check():
     import importlib.metadata as meta
-    try:
-        ytdlp_ver = meta.version("yt-dlp")
-    except Exception:
-        ytdlp_ver = "unknown"
-    try:
-        bgutil_ver = meta.version("bgutil-ytdlp-pot-provider")
-    except Exception:
-        bgutil_ver = "not installed"
+    def ver(pkg):
+        try: return meta.version(pkg)
+        except Exception: return "unknown"
 
-    bgutil_server = False
+    # ping bgutil
+    bgutil_ok = False
     try:
-        with urllib.request.urlopen("http://127.0.0.1:4416", timeout=2):
-            bgutil_server = True
+        urllib.request.urlopen(f"{BGUTIL_URL}/", timeout=2)
+        bgutil_ok = True
     except Exception:
-        # Server might be running but return non-200
-        bgutil_pid = os.path.exists("/tmp/bgutil.pid")
-        bgutil_server = bgutil_pid
+        bgutil_ok = os.path.exists("/tmp/bgutil.pid")
+
+    node = shutil.which("node") or "/tmp/node"
+    node_ver = ""
+    if os.path.exists(node):
+        _, nv, _ = run_cmd([node, "--version"])
+        node_ver = nv.strip()
 
     return {
         "status": "ok",
-        "yt_dlp_version": ytdlp_ver,
-        "bgutil_plugin": bgutil_ver,
-        "bgutil_server": bgutil_server,
-        "pot_provider_url": os.environ.get("YT_DLP_POT_PROVIDER_URL", "not set"),
-        "node_found": bool(shutil.which("node") or os.path.exists("/tmp/node")),
+        "yt_dlp_version": ver("yt-dlp"),
+        "bgutil_plugin": ver("bgutil-ytdlp-pot-provider"),
+        "bgutil_server": bgutil_ok,
+        "bgutil_url": BGUTIL_URL,
+        "node_version": node_ver,
         "deno_found": os.path.exists("/tmp/deno"),
         "secret_cookies": os.path.exists("/etc/secrets/cookies.txt"),
         "tmp_cookies": os.path.exists("/tmp/cookies.txt"),
+        "bgutil_global": _bgutil_running,
     }
+
+
+@app.get("/debug/ytdlp")
+async def debug_ytdlp():
+    """Verbose yt-dlp test — shows exact error + bgutil POT logs."""
+    import yt_dlp
+    loop = asyncio.get_event_loop()
+
+    messages = []
+
+    class LogCollector:
+        def debug(self, msg):
+            if "[pot]" in msg or "bgutil" in msg or "PO Token" in msg or "player" in msg.lower():
+                messages.append(f"[DEBUG] {msg}")
+        def warning(self, msg): messages.append(f"[WARN] {msg}")
+        def error(self, msg): messages.append(f"[ERROR] {msg}")
+
+    opts = make_ytdlp_opts(0)
+    opts["quiet"] = False
+    opts["verbose"] = True
+    opts["skip_download"] = True
+    opts["logger"] = LogCollector()
+
+    try:
+        def _run():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    download=False
+                )
+        info = await asyncio.wait_for(
+            loop.run_in_executor(None, _run), timeout=60
+        )
+        return {
+            "success": True,
+            "title": info.get("title"),
+            "formats_count": len(info.get("formats", [])),
+            "log_lines": messages[-30:],
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)[:500],
+            "log_lines": messages[-30:],
+            "bgutil_running": _bgutil_running,
+        }
 
 
 @app.post("/info")
 async def get_info(req: URLRequest):
-    loop = asyncio.get_event_loop()
+    import yt_dlp
+    loop  = asyncio.get_event_loop()
+    oembed = await loop.run_in_executor(None, oembed_info, req.url)
+    last_err = ""
 
-    # ── Layer 1: oEmbed (metadata only, never blocked) ──
-    oembed = await loop.run_in_executor(None, get_oembed_info, req.url)
-
-    # ── Layer 2: yt-dlp with client rotation ──
-    last_error = ""
-    for i in range(len(CLIENT_STRATEGIES)):
+    for i in range(len(CLIENT_COMBOS)):
         try:
-            opts = get_ytdlp_opts(i)
-            opts["skip_download"] = True
+            opts = make_ytdlp_opts(i, {"skip_download": True})
 
-            def _extract(opts=opts):
-                import yt_dlp
-                with yt_dlp.YoutubeDL(opts) as ydl:
+            def _extract(o=opts):
+                with yt_dlp.YoutubeDL(o) as ydl:
                     return ydl.extract_info(req.url, download=False)
 
             info = await asyncio.wait_for(
-                loop.run_in_executor(None, _extract),
-                timeout=60,
+                loop.run_in_executor(None, _extract), timeout=60
             )
 
-            formats = []
+            fmts = []
             for f in info.get("formats", []):
-                formats.append({
+                fmts.append({
                     "format_id": f.get("format_id"),
                     "ext": f.get("ext"),
                     "resolution": f.get("resolution") or f.get("format_note"),
@@ -369,99 +460,84 @@ async def get_info(req: URLRequest):
                 })
 
             return {
-                "source": f"yt-dlp (clients: {CLIENT_STRATEGIES[i]})",
-                "title": info.get("title") or (oembed.get("title") if oembed else ""),
-                "thumbnail": info.get("thumbnail") or (oembed.get("thumbnail_url") if oembed else ""),
+                "source": f"yt-dlp/{CLIENT_COMBOS[i]}",
+                "title": info.get("title") or (oembed or {}).get("title",""),
+                "thumbnail": info.get("thumbnail") or (oembed or {}).get("thumbnail_url",""),
                 "duration": info.get("duration"),
-                "uploader": info.get("uploader") or (oembed.get("author_name") if oembed else ""),
+                "uploader": info.get("uploader") or (oembed or {}).get("author_name",""),
                 "view_count": info.get("view_count"),
-                "formats": formats,
+                "formats": fmts,
             }
         except asyncio.TimeoutError:
-            last_error = f"Timeout on strategy {i}"
-            print(f"⚠️ {last_error}")
+            last_err = f"timeout on combo {i}"
             continue
         except Exception as e:
-            last_error = str(e)
-            print(f"⚠️ Strategy {i} failed: {last_error[:100]}")
+            last_err = str(e)[:200]
+            print(f"⚠️  combo {i} {CLIENT_COMBOS[i]}: {last_err}")
             continue
 
-    # If yt-dlp completely failed but we have oembed
     if oembed:
-        return {
-            "source": "oembed_only",
-            "title": oembed.get("title", ""),
-            "thumbnail": oembed.get("thumbnail_url", ""),
-            "duration": None,
-            "uploader": oembed.get("author_name", ""),
-            "formats": [],
-            "warning": f"Full info failed: {last_error[:200]}",
-        }
+        return {"source": "oembed_only", "title": oembed.get("title",""),
+                "thumbnail": oembed.get("thumbnail_url",""),
+                "formats": [], "warning": last_err}
 
-    raise HTTPException(status_code=400, detail=f"All strategies failed: {last_error}")
+    raise HTTPException(400, detail=f"All strategies failed: {last_err}")
 
 
 @app.post("/download")
 async def download_video(req: DownloadRequest):
+    import yt_dlp
     loop = asyncio.get_event_loop()
-    last_error = ""
+    last_err = ""
 
-    for i in range(len(CLIENT_STRATEGIES)):
+    for i in range(len(CLIENT_COMBOS)):
         try:
-            import yt_dlp
-            opts = get_ytdlp_opts(i)
-
             with tempfile.NamedTemporaryFile(
                 suffix=".tmp", prefix="sheikh_", dir="/tmp", delete=False
             ) as tmp:
-                base_path = tmp.name.replace(".tmp", "")
+                base = tmp.name.replace(".tmp","")
 
-            out_tmpl = base_path + ".%(ext)s"
+            out_tmpl = base + ".%(ext)s"
 
+            extra = {}
             if req.audio_only:
-                opts["format"] = "bestaudio/best"
-                opts["postprocessors"] = [{
+                extra["format"] = "bestaudio/best"
+                extra["postprocessors"] = [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
                     "preferredquality": "192",
                 }]
             else:
-                if req.format_id and req.format_id not in ["best", ""]:
-                    opts["format"] = req.format_id
-                else:
-                    opts["format"] = "bestvideo*+bestaudio/best"
-                opts["merge_output_format"] = "mp4"
+                extra["format"] = (req.format_id if req.format_id not in ["best",""]
+                                   else "bestvideo*+bestaudio/best")
+                extra["merge_output_format"] = "mp4"
 
-            opts["outtmpl"] = out_tmpl
+            extra["outtmpl"] = out_tmpl
+            opts = make_ytdlp_opts(i, extra)
 
-            def _download(opts=opts):
-                with yt_dlp.YoutubeDL(opts) as ydl:
+            def _dl(o=opts):
+                with yt_dlp.YoutubeDL(o) as ydl:
                     info = ydl.extract_info(req.url, download=True)
                     return ydl.prepare_filename(info)
 
             filename = await asyncio.wait_for(
-                loop.run_in_executor(None, _download),
-                timeout=300,
+                loop.run_in_executor(None, _dl), timeout=300
             )
 
             if not os.path.exists(filename):
-                matches = glob.glob(base_path + ".*")
+                matches = glob.glob(base + ".*")
                 filename = matches[0] if matches else None
 
             if filename and os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return FileResponse(
-                    path=filename,
-                    filename=os.path.basename(filename),
-                    media_type="application/octet-stream",
-                )
-
+                return FileResponse(path=filename,
+                                    filename=os.path.basename(filename),
+                                    media_type="application/octet-stream")
         except asyncio.TimeoutError:
-            last_error = f"Timeout on strategy {i}"
-            print(f"⚠️ {last_error}")
+            last_err = f"timeout combo {i}"
             continue
         except Exception as e:
-            last_error = str(e)
-            print(f"⚠️ Download strategy {i} failed: {last_error[:100]}")
+            last_err = str(e)[:200]
+            print(f"⚠️  dl combo {i}: {last_err}")
             continue
 
-    raise HTTPException(status_code=400, detail=f"All download strategies failed: {last_error}")
+    raise HTTPException(400, detail=f"All download strategies failed: {last_err}")
