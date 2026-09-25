@@ -6,6 +6,7 @@ import yt_dlp
 import os
 import re
 import glob
+import shutil
 import subprocess
 import sys
 
@@ -47,8 +48,15 @@ def get_format_label(f: dict) -> str:
     return f"{ext}{size_str}"
 
 def get_base_opts():
-    # Render secret file path
-    cookies_path = "/etc/secrets/cookies.txt"
+    cookies_src = "/etc/secrets/cookies.txt"
+    cookies_dst = "/tmp/cookies.txt"
+
+    # Copy cookies to writable /tmp folder
+    if os.path.exists(cookies_src):
+        try:
+            shutil.copy2(cookies_src, cookies_dst)
+        except Exception:
+            pass
 
     opts = {
         "quiet": True,
@@ -68,8 +76,8 @@ def get_base_opts():
         "nocheckcertificate": True,
     }
 
-    if os.path.exists(cookies_path):
-        opts["cookiefile"] = cookies_path
+    if os.path.exists(cookies_dst):
+        opts["cookiefile"] = cookies_dst
 
     return opts
 
@@ -79,11 +87,14 @@ def root():
 
 @app.get("/check-cookies")
 def check_cookies():
-    cookies_path = "/etc/secrets/cookies.txt"
-    if os.path.exists(cookies_path):
-        size = os.path.getsize(cookies_path)
-        return {"cookies_found": True, "file_size_bytes": size}
-    return {"cookies_found": False}
+    cookies_src = "/etc/secrets/cookies.txt"
+    cookies_dst = "/tmp/cookies.txt"
+    return {
+        "secret_file_exists": os.path.exists(cookies_src),
+        "tmp_file_exists": os.path.exists(cookies_dst),
+        "secret_size": os.path.getsize(cookies_src) if os.path.exists(cookies_src) else 0,
+        "tmp_size": os.path.getsize(cookies_dst) if os.path.exists(cookies_dst) else 0,
+    }
 
 @app.post("/info")
 def get_video_info(req: VideoRequest):
