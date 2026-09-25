@@ -35,27 +35,12 @@ def install_nightly_ytdlp():
 
 
 def install_deno():
-    deno_path = "/usr/local/bin/deno"
+    # Use /tmp/deno since /usr/local/bin is read-only on Render
+    deno_path = "/tmp/deno"
     if os.path.exists(deno_path):
-        print("✅ Deno already installed")
+        print("✅ Deno already installed at /tmp/deno")
         return
 
-    # Method 1: official installer
-    try:
-        result = subprocess.run(
-            "curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh",
-            shell=True, timeout=120, capture_output=True, text=True
-        )
-        print(f"Deno stdout: {result.stdout[-300:] if result.stdout else 'none'}")
-        print(f"Deno stderr: {result.stderr[-300:] if result.stderr else 'none'}")
-    except Exception as e:
-        print(f"⚠️ Deno method 1 failed: {e}")
-
-    if os.path.exists(deno_path):
-        print("✅ Deno installed via method 1")
-        return
-
-    # Method 2: direct binary download
     try:
         arch_result = subprocess.run(["uname", "-m"], capture_output=True, text=True)
         arch = arch_result.stdout.strip()
@@ -64,17 +49,23 @@ def install_deno():
         else:
             deno_url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip"
 
-        subprocess.run(
-            f"curl -fsSL {deno_url} -o /tmp/deno.zip && "
-            f"unzip -o /tmp/deno.zip -d /usr/local/bin/ && "
-            f"chmod +x /usr/local/bin/deno",
-            shell=True, timeout=120, capture_output=True
+        print(f"Downloading Deno for arch: {arch}")
+
+        result = subprocess.run(
+            f"curl -fsSL '{deno_url}' -o /tmp/deno.zip && "
+            f"unzip -o /tmp/deno.zip -d /tmp/ && "
+            f"chmod +x /tmp/deno && "
+            f"rm -f /tmp/deno.zip",
+            shell=True, timeout=120, capture_output=True, text=True
         )
+        print(f"Deno install stdout: {result.stdout[-200:] if result.stdout else 'none'}")
+        print(f"Deno install stderr: {result.stderr[-200:] if result.stderr else 'none'}")
+
     except Exception as e:
-        print(f"⚠️ Deno method 2 failed: {e}")
+        print(f"⚠️ Deno install failed: {e}")
 
     if os.path.exists(deno_path):
-        print("✅ Deno installed via method 2")
+        print("✅ Deno installed at /tmp/deno")
     else:
         print("❌ Deno could not be installed")
 
@@ -140,7 +131,7 @@ def get_format_label(fmt: dict) -> str:
 
 
 def get_base_opts() -> dict:
-    deno_path = "/usr/local/bin/deno"
+    deno_path = "/tmp/deno"
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -188,7 +179,7 @@ def check():
         ver = "unknown"
     return {
         "yt_dlp_version": ver,
-        "deno_found": os.path.exists("/usr/local/bin/deno"),
+        "deno_found": os.path.exists("/tmp/deno"),
         "secret_cookies": os.path.exists("/etc/secrets/cookies.txt"),
         "tmp_cookies": os.path.exists("/tmp/cookies.txt"),
     }
